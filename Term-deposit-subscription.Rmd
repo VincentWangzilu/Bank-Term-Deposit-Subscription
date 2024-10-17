@@ -1,0 +1,2084 @@
+---
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r}
+#| label: libraries
+library(gmodels)
+library(dplyr)
+library(skimr)
+library(gt)
+library(ggplot2)
+library(GGally)
+library(gridExtra)
+library(GGally)
+library(class)
+library(MASS)
+library(caret) # for confusion matrix
+library(e1071)
+library(ROCR) # For AUC
+library(corrplot)
+library(pROC)      # for ROC plot
+library(rpart)
+library(randomForest)
+library(rpart.plot)
+library(knitr)
+```
+
+# Introduction {#sec-Intro}
+
+The study aims to predict the factors that impact the subscription of
+term deposit (yes/no). The data set contains 10,000 records from a
+Portuguese banking institution's directed marketing campaigns conducted
+via phone calls. These campaigns targeted clients to promote bank term
+deposits. The data set comprises information from 17 campaigns spanning
+May 2008 to November 2010.
+
+```{r}
+df <- read.csv("group_14.csv") #Import the data set#
+```
+
+# Data Pre-processing {#sec-DW}
+
+The process below describes the detailed data wrangling techniques that
+are used to get the desired data set. On the further examination of the
+data set, it was observed that there were some empty cells present.
+These cells were substituted by NA. The categorical columns were
+converted to factor type.
+
+```{r}
+#Check for missing values#
+missing_values <- colSums(is.na(df)) # no missing values
+df[df == ""] <- NA #However, empty cells were observed & NA values were assigned
+df <- df %>% #Change character variables to factors
+  mutate_at(vars(job, marital, education, default, housing, 
+                 loan, contact, month, day_of_week, poutcome, y), as.factor)
+df_numeric <- df %>%
+  select_if(is.numeric) # numeric data set as 'df_numeric'
+df_not_numeric <- df %>%
+  dplyr::select(job, marital, education, default, housing, loan, contact, month, day_of_week, poutcome, y)
+df_new <- cbind(df_not_numeric, df_numeric) # non-numeric data set 'df_not_numéric'
+#Summary Statistics#
+summary_df_new <- summary(df_new) 
+```
+
+From the summary statistics, number of missing values were observed in
+categorical columns. These missing values were imputed by Mode.
+
+```{r}
+#Impute NA values#
+#JOB
+sum_job <- summary(df_new$job) # 84 NA values
+job_mode <- names(which.max(table(df_new$job))) # "admin."
+df_new$job[is.na(df_new$job)] <- job_mode
+
+#MARITAL
+sum_mar <- summary(df_new$marital) # 25 NA values
+marital_mode <- names(which.max(table(df_new$marital))) # "married"
+df_new$marital[is.na(df_new$marital)] <- marital_mode
+
+#EDUCATION
+sum_edu <- summary(df_new$education) # 402 NA
+edu_mode <- names(which.max(table(df_new$education))) # "university.degree"
+df_new$education[is.na(df_new$education)] <- edu_mode
+
+#DEFAULT
+dum_def <- summary(df_new$default) # 2151 NA
+default_mode <- names(which.max(table(df_new$default)))  # "no"
+df_new$default[is.na(df_new$default)] <- default_mode
+
+#HOUSING
+sum_hous <- summary(df_new$housing) # 241 NA
+housing_mode <- names(which.max(table(df_new$housing))) # "yes"
+df_new$housing[is.na(df_new$housing)] <- housing_mode
+
+#LOAN
+sum_loan <- summary(df_new$loan) # 241 NA
+loan_mode <- names(which.max(table(df_new$loan))) # "no"
+df_new$loan[is.na(df_new$loan)] <- loan_mode
+
+#Check for NA values using colSums(is.na(df_new)) resulted in No more NA values
+```
+
+The column 'default' has 2151 missing values. Since there are replaced
+by the mode, there are 9999 No and 1 yes. This imputation does not
+provide any relevant information. Hence, 'default' will be omitted.
+
+```{r}
+#| label: fig-dow-age
+#| fig-cap: Understandind the Data structure of Day of the Week and Age
+#| fig-subcap:
+#|   - "Historgram of day_of_week"
+#|   - "Boxplot of age"
+#| layout-ncol: 2
+#| column: page
+#| fig-align: left
+#| fig-width: 3
+#| fig-height: 3
+
+#day-of the week#
+dow_dist <- df_new %>% 
+  group_by(day_of_week) %>%
+  dplyr::summarise(dow_count= n()) 
+ggplot(df_new, aes(x = day_of_week, fill = y)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Dodged barplot",
+       x = "Day of Week",
+       y = "Count",
+       fill = "y")+
+  theme_bw()
+chi_dow <- chisq.test(df_new$day_of_week, df_new$y) # p-value = 0.4149 > 0.05
+# This suggests that there is not enough evidence to conclude a significant association between the two categorical variables.
+
+# Duration : discard as per the data description instruction
+# Columns removed #
+df_new <- df_new %>%
+  dplyr::select(-default, -day_of_week, -duration)
+# age 
+ggplot(data = df_new, aes(x = "", y = age)) +
+  geom_boxplot(fill = "skyblue", color = "black")+
+  theme_bw()
+df_new$age <- log(df_new$age)
+# pdays
+summary(df_new$pdays)
+# Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# 0.0   999.0   999.0   963.5   999.0   999.0 
+```
+
+From the above graph it can be seen that there are the days of the week
+do not affect the distribution of the response variable greatly. Due to
+this, 'day_of_week' is omitted. This can further be verified by using
+chi-squared test of independence. From the summary statistics as well as
+the box plot, 'age' seems to display a large variation and great number
+of outliers. Logarithmic transformation is applied for robust analysis.
+For column 'pdays' it can be observed that is highly skewed, with most
+values concentrated in a specific range around '999'. This can reduce
+the effectiveness of the variable in splitting the data into homogeneous
+groups, which is essential for some classification models. Considering
+this, this column is not included henceforth.Binary variable is allotted
+to the response variable 'y' .
+
+```{r}
+df_new_numeric <- df_new %>%
+  select_if(is.numeric)
+df_new_not_numeric <- df_new %>%
+  dplyr::select(c(job, marital, education, housing,loan, contact, month, poutcome))
+y <- df_new$y # Binary Variable for y 
+df_new$y_coded <- ifelse(df_new$y == "yes", 1, 0)
+y_coded <- df_new$y_coded
+data <- cbind(y, y_coded, df_new_not_numeric , df_new_numeric)
+```
+
+# Exploratory Data Analysis {#sec-EDA}
+
+The data frame is divided into a training set, validation set and test
+set using 50%-25%-25% division. The Exploratory data analysis is
+performed on the training data set.
+
+```{r}
+set.seed(1)
+n <- nrow(data)
+ind1 <- sample(c(1:n), floor(0.5*n))
+ind2 <- sample(c(1:n)[-ind1], floor(0.25*n))
+ind3 <- setdiff(c(1:n),c(ind1,ind2))
+data.train <- data[ind1,] # 5000
+data.valid <- data[ind2,] # 2500
+data.test  <- data[ind3,] # 2500
+
+```
+
+## Visualizations {#sec-viz}
+
+### Summary Statistics
+
+Summary Statistics for Categorical variables are as follows:
+
+```{r}
+#Summary Statistics of the Categorical Data#
+knit_print.skim_df <- function(x, ...) {
+  cat("Skim summary:\n")
+  cat("-------------\n")
+  gt_obj <- gt(x) %>%
+    tab_header(
+      title = "Skim summary"
+    )
+  # Return the gt table
+  return(gt_obj)
+}
+
+my_skim <- skim_with(base=sfl(n=length),factor=sfl(ordered=NULL), numeric=sfl(p0=NULL,p100=NULL,hist = NULL))
+summary_cat <- my_skim(data.train)
+knit_print(summary_cat)
+```
+
+Summary for Numerical Data is given in @tbl-summary-numerical
+
+```{r}
+#| label: tbl-summary-numerical
+#| tbl-cap: Summary statistics of the Numerical Data
+summary_age <- data.train %>%
+  dplyr::summarise('Variables'="age",
+            'Mean' = mean(age),
+            'Median' = median(age),
+            'St.Dev' = sd(age),
+            'Min' = min(age),
+            'Max' = max(age),
+            'IQR' = quantile(age,0.75)-quantile(age,0.25),
+            'Sample_size' = n())
+summary_campaign <- data.train %>%
+  dplyr::summarise('Variables'="campaign",
+            'Mean' = mean(campaign),
+            'Median' = median(campaign),
+            'St.Dev' = sd(campaign),
+            'Min' = min(campaign),
+            'Max' = max(campaign),
+            'IQR' = quantile(campaign,0.75)-quantile(campaign,0.25),
+            'Sample_size' = n())
+summary_previous <- data.train %>%
+  dplyr::summarise('Variables'="previous",
+            'Mean' = mean(previous),
+            'Median' = median(previous),
+            'St.Dev' = sd(previous),
+            'Min' = min(previous),
+            'Max' = max(previous),
+            'IQR' = quantile(previous,0.75)-quantile(previous,0.25),
+            'Sample_size' = n())
+summary_emp.var.rate <- data.train %>%
+  dplyr::summarise('Variables'="emp.var.rate",
+            'Mean' = mean(emp.var.rate),
+            'Median' = median(emp.var.rate),
+            'St.Dev' = sd(emp.var.rate),
+            'Min' = min(emp.var.rate),
+            'Max' = max(emp.var.rate),
+            'IQR' = quantile(emp.var.rate,0.75)-quantile(emp.var.rate,0.25),
+            'Sample_size' = n())
+summary_cons.price.idx <- data.train %>%
+  dplyr::summarise('Variables'="cons.price.idx",
+            'Mean' = mean(cons.price.idx),
+            'Median' = median(cons.price.idx),
+            'St.Dev' = sd(cons.price.idx),
+            'Min' = min(cons.price.idx),
+            'Max' = max(cons.price.idx),
+            'IQR' = quantile(cons.price.idx,0.75)-quantile(cons.price.idx,0.25),
+            'Sample_size' = n())
+summary_cons.conf.idx <- data.train %>%
+  dplyr::summarise('Variables'="cons.conf.idx",
+            'Mean' = mean(cons.conf.idx),
+            'Median' = median(cons.conf.idx),
+            'St.Dev' = sd(cons.conf.idx),
+            'Min' = min(cons.conf.idx),
+            'Max' = max(cons.conf.idx),
+            'IQR' = quantile(cons.conf.idx,0.75)-quantile(cons.conf.idx,0.25),
+            'Sample_size' = n())
+summary_euribor3m <- data.train %>%
+  dplyr::summarise('Variables'="euribor3m",
+            'Mean' = mean(euribor3m),
+            'Median' = median(euribor3m),
+            'St.Dev' = sd(euribor3m),
+            'Min' = min(euribor3m),
+            'Max' = max(euribor3m),
+            'IQR' = quantile(euribor3m,0.75)-quantile(euribor3m,0.25),
+            'Sample_size' = n())
+summary_nr.employed <- data.train %>%
+  dplyr::summarise('Variables'="nr.employed",
+            'Mean' = mean(nr.employed),
+            'Median' = median(nr.employed),
+            'St.Dev' = sd(nr.employed),
+            'Min' = min(nr.employed),
+            'Max' = max(nr.employed),
+            'IQR' = quantile(nr.employed,0.75)-quantile(nr.employed,0.25),
+            'Sample_size' = n())
+combined_summary <- bind_rows(summary_age, summary_campaign, summary_previous, summary_emp.var.rate, summary_cons.price.idx, summary_cons.conf.idx, summary_euribor3m,
+                              summary_nr.employed)
+combined_summary |>
+  gt() |>
+  fmt_number(decimals=2) |>
+  cols_label(
+    Variables=html("Variables"),
+    Mean = html("Mean"),
+    Median = html("Median"),
+    St.Dev = html("Std. Dev"),
+    Min = html("Min"),
+    Max = html("Max"),
+    IQR = html("IQR"),
+    Sample_size = html("Sample Size")
+  ) 
+```
+
+In the summary statistics above, it is evident that the continuous
+variables exhibit significant variability, with notable differences
+observed in dispersion of their minimum and maximum values.
+
+### Histograms
+
+The histograms to observe the data structures for all the variables are
+constructed.It can be observed:
+
+-   **job**: More number of customers have jobs in 'admin' followed by
+    'blue-collar'
+
+-   **education**: The maximum number of customers have a university
+    degree. There are almost negligible 'illerterate' customers (only 2)
+
+-   **marital**: The marital status of maximum number of customers is
+    married
+
+-   **housing**: More customers have a housing loan, but the difference
+    compared to those without is not significant.
+
+-   **loan**: Most customers do not have a personal loan but few
+    customers do.
+
+-   **contact**: More customers were contacted by the type 'cellular'
+
+-   **month**: May was month of the year in which the most customers
+    were contacted last
+
+-   **poutcome**: The outcome of the previous marketing campaign is
+    'nonexistent' for the most customers
+
+It can be observed that the response variable 'y' is quite imbalanced.
+
+```{r}
+#Visualizations# UNIVARIATE PLOTS
+#Job#
+job_dist <- data.train %>%
+  group_by(job) %>%
+  dplyr::summarise(job_count = n()) %>%
+  arrange(desc(job_count))
+job_plot <- ggplot(data = job_dist, aes(x = reorder(job, -job_count), y = job_count)) +
+  geom_col() + 
+  labs(title = "Job Distribution of Customers",
+       x = "Job Level",
+       y = "Count")+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+#EDUCATION#
+edu <- data.train %>%
+  group_by(education) %>%
+  dplyr::summarise(edu_count = n()) %>%
+  arrange(desc(edu_count))
+edu_plot <- ggplot(data = edu, aes(x = reorder(education, -edu_count), y = edu_count)) +
+  geom_col() + # aes(fill = education)
+  labs(title = "Education Distribution of Customers",
+       x = "Education Level",
+       y = "Count")+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))# maximum have university degree followed by high school
+#MARITAL STATUS#
+marital_dist <- data.train %>%
+  group_by(marital) %>%
+  dplyr::summarise(marital_count = n()) %>%
+  arrange(desc(marital_count))
+marital_plot <- ggplot(data = marital_dist, aes(x = reorder(marital, -marital_count), y = marital_count)) +
+  geom_col() +
+  labs(title = "Marital Distribution of Customers",
+       x = "Marital Status",
+       y = "Count")+
+  theme_bw() #maximum are married
+#HOUSING#
+housing_dist <- data.train %>%
+  group_by(housing) %>%
+  dplyr::summarise(housing_count = n()) %>%
+  arrange(desc(housing_count))
+housing_plot <- ggplot(data = housing_dist, aes(x = reorder(housing, -housing_count), y = housing_count)) +
+  geom_col() +
+  labs(title = "Housing Loan Distribution of Customers",
+       x = "Housing",
+       y = "Count")+
+  theme_bw() # not a big difference
+#LOAN#
+loan_dist <- data.train %>%
+  group_by(loan) %>%
+  dplyr::summarise(loan_count = n()) %>%
+  arrange(desc(loan_count))
+loan_plot <- ggplot(data = loan_dist, aes(x = reorder(loan, -loan_count), y = loan_count)) +
+  geom_col() +
+  labs(title = "Personal Loan Distribution of Customers",
+       x = "Loan",
+       y = "Count")+
+  theme_bw() # not a big difference
+#contact#
+contact_dist <- data.train %>%
+  group_by(contact) %>%
+  dplyr::summarise(contact_count = n()) %>%
+  arrange(desc(contact_count))
+contact_plot <- ggplot(data = contact_dist, aes(x = reorder(contact, -contact_count), y = contact_count)) +
+  geom_col() +
+  labs(title = "Contact Distribution of Customers",
+       x = "Contact",
+       y = "Count")+
+  theme_bw()  #Maximum have cellular
+#MONTH#
+month_dist <- data.train %>%
+  group_by(month) %>%
+  dplyr::summarise(month_count = n()) %>%
+  arrange(desc(month_count))
+month_plot <- ggplot(data = month_dist, aes(x = reorder(month, -month_count), y = month_count)) +
+  geom_col() +
+  labs(title = "Monthly Distribution of Customers",
+       x = "Month",
+       y = "Count")+
+  theme_bw() #May is the highest then July, least is December
+#poutcome#
+poutcome_dist <- data.train %>%
+  group_by(poutcome) %>%
+  dplyr::summarise(poutcome_count = n()) %>%
+  arrange(desc(poutcome_count))
+poutcome_plot <- ggplot(data = poutcome_dist, aes(x = reorder(poutcome, -poutcome_count), y = poutcome_count)) +
+  geom_col() +
+  labs(title = "poutcome Distribution of Customers",
+       x = "poutcome",
+       y = "Count")+
+  theme_bw() #maximum are NON EXISTANT
+#Response Y#
+y_dist <- data.train %>%
+  group_by(y) %>%
+  dplyr::summarise(y_count = n()) %>%
+  arrange(desc(y_count))
+y_plot <- ggplot(data = y_dist, aes(x = reorder(y, -y_count), y = y_count)) +
+  geom_col(aes(fill = y)) +
+  labs(title = "y Distribution of Customers",
+       x = "y",
+       y = "Count")+
+  theme_bw()
+grid.arrange(job_plot, edu_plot, marital_plot, housing_plot, loan_plot, contact_plot, month_plot,  poutcome_plot, y_plot,ncol = 4)
+```
+
+```{r}
+# Bivariate Plot
+# Job Distribution with respect to y
+job_y_plot <- ggplot(data.train, aes(x = job, fill = y)) +
+  geom_bar(position = "stack") +
+  labs(title = "Job Distribution of Customers by y",
+       x = "Job",
+       y = "Count",
+       fill = "y")+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Education Distribution with respect to y
+edu_y_plot <- ggplot(data.train, aes(x = education, fill = y)) +
+  geom_bar(position = "stack") +
+  labs(title = "Education Distribution of Customers by y",
+       x = "Education Level",
+       y = "Count",
+       fill = "y")+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Marital Distribution with respect to y
+marital_y_plot <- ggplot(data.train, aes(x = marital, fill = y)) +
+  geom_bar(position = "stack") +
+  labs(title = "Marital Distribution of Customers by y",
+       x = "Marital Status",
+       y = "Count",
+       fill = "y")+
+  theme_bw()
+
+# Housing Distribution with respect to y
+housing_y_plot <- ggplot(data.train, aes(x = housing, fill = y)) +
+  geom_bar(position = "stack") +
+  labs(title = "Housing Distribution of Customers by y",
+       x = "Housing",
+       y = "Count",
+       fill = "y")+
+  theme_bw()
+# Loan Distribution with respect to y
+loan_y_plot <- ggplot(data.train, aes(x = loan, fill = y)) +
+  geom_bar(position = "stack") +
+  labs(title = "Loan Distribution of Customers by y",
+       x = "Loan",
+       y = "Count",
+       fill = "y")+
+  theme_bw()
+# Contact Distribution with respect to y
+contact_y_plot <- ggplot(data.train, aes(x = contact, fill = y)) +
+  geom_bar(position = "stack") +
+  labs(title = "Contact Distribution of Customers by y",
+       x = "Contact",
+       y = "Count",
+       fill = "y")+
+  theme_bw()
+# Month Distribution with respect to y
+month_y_plot <- ggplot(data.train, aes(x = month, fill = y)) +
+  geom_bar(position = "stack") +
+  labs(title = "Month Distribution of Customers by y",
+       x = "Month",
+       y = "Count",
+       fill = "y")+
+  theme_bw()
+# poutcome Distribution with respect to y
+poutcome_y_plot <- ggplot(data.train, aes(x = poutcome, fill = y)) +
+  geom_bar(position = "stack") +
+  labs(title = "Poutcome Distribution of Customers by y",
+       x = "Poutcome",
+       y = "Count",
+       fill = "y")+
+  theme_bw()
+grid.arrange(job_y_plot, edu_y_plot, marital_y_plot, housing_y_plot, loan_y_plot,contact_y_plot, month_y_plot, poutcome_y_plot, ncol = 4)
+```
+
+### Correlation using Scatterplot Matrix
+
+```{r}
+#Visualization for NUMERIC DATA#
+df_new_numeric <- df_new %>%
+  select_if(is.numeric)
+ggpairs(df_new_numeric,columns=1:8, ggplot2::aes(colour = y, alpha = 0.2), title = "Scatterplot matrix")+
+  theme_bw()
+```
+
+The above displays the correlation between different continuous
+variables as per the 'yes;' and 'no' of response variable 'y'. It can be
+observed there are mostly weak correlations. However, strong correlation
+can be noticed between euribor3m and emp.var.rate, nr.employed &
+emp.var.rate , euribor3m & nr.employed. Moderate correlation can be
+observed between cons.price.idx & emp.var.rate, euribor3m &
+cons.price.idx.
+
+### Test for Independence
+
+To test if there is a significant association between the two
+categorical variables, chi-square test and fisher tests were conducted.
+For both the tests, the null hypothesis assumes that the variables are
+independent, while the alternative hypothesis suggests otherwise. All
+variables have p \< 0.05 except 'loan' and 'housing. This suggests that
+there is no significant association between the two categorical
+variables.
+
+```{r}
+# Checking Significance
+chi_job <- chisq.test(data.train$job, data.train$y) # p-value < 0.05
+chi_marital <- chisq.test(data.train$marital, data.train$y) # p-value < 0.05
+chi_edu <- chisq.test(data.train$education, data.train$y) # Chi-squared approximation may be incorrect
+chi_housing <- chisq.test(data.train$housing, data.train$y) # p-value > 0.05
+chi_loan <- chisq.test(data.train$loan, data.train$y) # p-value > 0.05
+chi_contact <- chisq.test(data.train$contact, data.train$y) # p-value < 0.05
+chi_month <- chisq.test(data.train$month, data.train$y) # Chi-squared approximation may be incorrect
+chi_poutcome <- chisq.test(data.train$poutcome, data.train$y) # p-value < 0.05
+
+# education
+fisger_edu <-fisher.test(table(data.train$education, data.train$y), simulate.p.value = TRUE) # p-value < 0.05
+
+# month 
+fisher_month <- fisher.test(table(data.train$month, data.train$y), simulate.p.value = TRUE) # p-value < 0.05
+```
+
+### Outliers
+
+The data was further explored to check if there are any outliers in the
+continuous data. Few outlier were observed in age.Logarithmic
+transformation has already account for most, however age had few
+outliers. In 'cons.price.idx' columns, 53 observation were outliers but
+for the values -26.9. Since the outliers are few, it is decided to keep
+them in the dataset.
+
+```{r}
+# OUTLIERS AND boxplots OF CONTINUOUS VARIABLES#
+b1 <- ggplot(data = data.train, aes(x = y, y = age)) +
+  geom_boxplot(aes(fill = y)) +  
+  labs(x = "y", y = "Age")
+
+# emp.var.rate
+b2 <- ggplot(data.train, aes(x = y, y = emp.var.rate)) +
+  geom_boxplot(aes(fill = y)) +  
+  labs(x = "y", y = "emp.var.rate")
+
+# cons.price.idx
+b3 <- ggplot(data.train, aes(x = y, y = cons.price.idx)) +
+  geom_boxplot(aes(fill = y)) +  
+  labs(x = "y", y = "cons.price.idx")
+
+# cons.conf.idx
+b4 <- ggplot(data.train, aes(x = y, y = cons.conf.idx)) +
+  geom_boxplot(aes(fill = y)) +  
+  labs(x = "y", y = "cons.conf.idx")
+
+# euribor3m
+b5 <- ggplot(data.train, aes(x = y, y = euribor3m)) +
+  geom_boxplot(aes(fill = y)) +  
+  labs(x = "y", y = "euribor3m")
+
+# nr.employed
+b6 <- ggplot(data.train, aes(x = y, y = nr.employed)) +
+  geom_boxplot(aes(fill = y)) +  
+  labs(x = "y", y = "nr.employed")
+
+age_outliers <- data.train %>%
+  mutate(is_outlier = age > quantile(age, 0.75) + 1.5 * IQR(age) |
+           age < quantile(age, 0.25) - 1.5 * IQR(age)) %>%
+  filter(is_outlier) %>%
+  ungroup() # 9 outliers
+
+cons.conf.idx_outliers <- data.train %>%
+  mutate(is_outlier = cons.conf.idx > quantile(cons.conf.idx, 0.75) + 1.5 * IQR(cons.conf.idx) |
+           cons.conf.idx < quantile(cons.conf.idx, 0.25) - 1.5 * IQR(cons.conf.idx)) %>%
+  filter(is_outlier) %>%
+  ungroup() # -26.9 is the outlier value of 53 observations
+```
+
+As housing and loan were found to be insignificant, they are omitted
+from the data sets.
+
+```{r}
+data.train <- data.train%>%
+  dplyr::select(-housing,-loan)
+data.test <- data.test%>%
+  dplyr::select(-housing,-loan)
+data.valid <- data.valid%>%
+  dplyr::select(-housing,-loan)
+```
+
+To conduct a statistical analysis for a data set containing both
+categorical and continuous variables, one-hot encoding is applied to
+categorical variables. In this method, the categorical variables are
+assigned a binary value of 1 or 0 so as to achieve a new column for each
+category of each categorical variable.
+
+```{r}
+categorical_columns <- c(3:8)
+# Perform one-hot encoding on selected columns using column numbers
+encoded_data.train <- model.matrix(~ . - 1, data = data.train[, categorical_columns])
+encoded_data.test <- model.matrix(~ . - 1, data = data.test[, categorical_columns])
+encoded_data.valid <- model.matrix(~ . - 1, data = data.valid[, categorical_columns])
+
+banking_data_train <- cbind(data.train[, 1:2], encoded_data.train, data.train[, setdiff(names(data.train), c(names(data.train)[1:2], names(data.train[, categorical_columns])))])
+banking_data_test <- cbind(data.test[, 1:2], encoded_data.test, data.test[, setdiff(names(data.test), c(names(data.test)[1:2], names(data.test[, categorical_columns])))])
+banking_data_valid <- cbind(data.valid[, 1:2], encoded_data.valid, data.valid[, setdiff(names(data.valid), c(names(data.valid)[1:2], names(data.valid[, categorical_columns])))])
+```
+
+However, as SVM and Tree based classification methods are compatible
+with categorical variables, one-hot encoding will not be applied to it.
+
+```{r}
+banking_data_train_svm <- data.train
+banking_data_test_svm <- data.test
+banking_data_valid_svm <- data.valid
+
+# Remove 'y_coded' column from the datasets
+banking_data_train_svm <- banking_data_train_svm[, !(names(banking_data_train_svm) %in% 'y_coded')]
+banking_data_test_svm <- banking_data_test_svm[, !(names(banking_data_test_svm) %in% 'y_coded')]
+banking_data_valid_svm <- banking_data_valid_svm[, !(names(banking_data_valid_svm) %in% 'y_coded')]
+
+banking_data_train_tree <- data.train
+banking_data_test_tree <- data.test
+banking_data_valid_tree <- data.valid
+
+# Remove 'y_coded' column from the datasets
+banking_data_train_tree <- banking_data_train_tree[, !(names(banking_data_train_tree) %in% 'y_coded')]
+banking_data_test_tree <- banking_data_test_tree[, !(names(banking_data_test_tree) %in% 'y_coded')]
+banking_data_valid_tree <- banking_data_valid_tree[, !(names(banking_data_valid_tree) %in% 'y_coded')]
+
+# Setting the factor levels for 'y' in each dataset
+banking_data_train_tree$y <- factor(banking_data_train_tree$y, levels = c("yes", "no"))
+banking_data_test_tree$y <- factor(banking_data_test_tree$y, levels = c("yes", "no"))
+banking_data_valid_tree$y <- factor(banking_data_valid_tree$y, levels = c("yes", "no"))
+```
+
+# Classification Methods
+
+### k-Nearest Neighbours {#sec-knn}
+
+k-Nearest Neighbours is a popular classification method in machine
+learning. It learns from the training data by remembering the features
+of each point, calculating the distance between points, choosing optimal
+k and finally makes predictions on validation data by predicting the
+class as the class label of majority of the k nearest points
+(neighbours). The method's effectiveness is evaluated using measures
+such as F1 score, sensitivity, and classification rates.
+
+An interesting point worth noticing is that knn does not assume a
+parametric model for the underlying data. This characterisitc
+facilitates easy understanding of forecasts, particularly for data such
+as our bank marketing dataset. It is utilised in this study to
+categorise the client subscription for term deposits. The method's
+capacity for pattern recognition is another reason for its application.
+Given the training on various factors, its principle that similar data
+points belong to the same class is useful for forecasting whether or not
+a client would subscribe to a term deposit.
+
+```{r}
+#Numerical summary for features in training data
+
+skim(banking_data_train)
+#Features have large ranges and sd
+#Diff range and sd in features
+#Euclidean  distance dominated by these features
+#Remedy: Standardise
+```
+
+It has been previously observed in @sec-EDA that the features in the
+data have different ranges and standard deviations. Since features with
+wide ranges and standard deviations might dominate the computation,
+adopting Euclidean Distance raises certain challenges. To deal with
+this, the features have been standardized so that they have zero mean
+and a variance of one.
+
+```{r}
+#Checking the column names
+names(banking_data_train)
+
+#Mean of features
+var.mean<-apply(banking_data_train[ ,c(3:41)],2,mean)
+
+#Standard Deviation of features
+var.sd<-apply(banking_data_train[ ,c(3:41)],2,sd)
+
+#Standardizing training, validation and test sets
+banking_data_train_scale <-t(apply(banking_data_train[,c(3:41)],1,function(x) (x-var.mean)/var.sd))
+banking_data_valid_scale <-t(apply(banking_data_valid[,c(3:41)],1,function(x) (x-var.mean)/var.sd))
+banking_data_test_scale <-t(apply(banking_data_test[,c(3:41)],1,function(x) (x-var.mean)/var.sd))
+```
+
+Moving forward the most important decision to be made when predicting
+classes using knn is the choice of k. Given that the response variable
+is binary, ideal choice should be an odd value for k to avoid ties in
+categories. To begin with, the focus is on evaluating the correct
+classification rate on the validation set for different values of k.
+
+```{r}
+#Finding optimal value of k
+set.seed(1)
+K <- c(1:25) 
+valid.corr <- c()
+for (k in K){
+  valid.pred <- knn(banking_data_train_scale,banking_data_valid_scale,banking_data_train[,1],k=k)
+  valid.corr[k] <- mean(banking_data_train[,1] == valid.pred)
+}
+
+```
+
+@fig-kopt plots the validation accuracy against different values of k to
+visually analyse the significance of k on model performance. The optimal
+k value would be the one which gives the highest correct classification
+rate, in this case, k=25 is the optimal choice. This step also makes
+predictions on the validation set which is utilised in assessing the
+performance of knn as a classification method.
+
+```{r}
+#| eval: true
+#| label: fig-kopt
+#| fig-cap: Correct Classification rates on the validation set for different values of k
+set.seed(1)
+#Plotting validation correct classification rate
+plot(K, valid.corr, type="b", ylab="validation correct classification rate")
+
+```
+
+```{r}
+#Assigning optimal k to k.opt
+set.seed(1)
+k.opt<-(which.max(valid.corr))
+k.opt # 23
+```
+
+```{r}
+#Checking levels of valid.pred
+levels_valid_pred <- levels(factor(valid.pred,levels=c("yes","no")))
+levels_valid_pred
+
+#Checking levels of data.valid$y
+levels_data_valid_y <- levels(factor(banking_data_valid$y,levels=c("yes","no")))
+levels_data_valid_y
+
+#Confusion matrix and Statistics
+conf_matrix <- confusionMatrix(reference =factor(banking_data_valid$y,levels=levels_data_valid_y),
+                               data = factor(valid.pred, levels = levels_valid_pred))$table
+conf_matrix
+
+#Extracting important values
+TP<-46
+FP<-22
+FN<-251
+TN<-2181
+
+#Accuracy
+accuracy<-(46+2181)/(46+2181+251+22)
+accuracy
+
+#Precision
+precision<-46/(46+22)
+precision
+
+#Recall
+recall<-46/(46+251)
+recall
+
+#F1 score
+f1<-(2*(precision*recall))/(precision+recall)
+f1
+
+```
+
+Finally, to formally analyse the performance the Confusion Matrix in
+@tbl-confmat is considered. It provides a comparison between actual
+classification and predicted classification on validation set making
+ground for obtaining informative metrics.
+
+knn correctly classifies 46 instances where it predicted "yes"
+(subscription) and the clients indeed subscribed (True Positives).
+
+It incorrectly classified 22 instances as "yes" (subscription) when the
+clients did not subscribe. These are cases where knn incorrectly
+identified potential subscribers (False Positives).
+
+It also incorrectly classified 251 instances as "no" (no subscription)
+when the clients actually subscribed. These are cases where knn failed
+to identify potential subscribers (False Negatives).
+
+Lastly, knn correctly classified 2181 instances as "no" (no
+subscription) where the clients did not subscribe (True Negatives).
+
+In summary, the confusion matrix helps the bank understand the
+performance of its subscription prediction model, enabling it to refine
+its marketing strategies to maximize subscription rates.
+
+Given these values, we further calculate performance metrics which
+indicate the performance of knn as a classification method for bank
+marketing data.
+
+```{r}
+#| label: tbl-confmat
+#| tbl-cap: Confusion Matrix for knn
+
+#Confusion matrix data with labels
+conf<- matrix(c(TP, FP, FN, TN), nrow = 2, ncol = 2, 
+               dimnames = list(c("Predicted.Yes", "Predicted.No"), c("Actual Yes", "Actual No")))
+
+#Creating data frame with row and column labels
+conf_matrix <- data.frame(conf)
+
+#Confusion Matrix 
+gt(conf_matrix,rownames_to_stub=T)
+```
+
+```{r}
+#| label: tbl-metrics
+#| tbl-cap: Performance Metrics
+metrics<-as.data.frame(list(Metric = c("Accuracy", "Precision", "Recall","F1"),
+                 Value = c(0.89,0.68,0.15,0.25)))
+
+gt(metrics)
+```
+
+@tb-metrics shows high overall accuracy of 0.89, indicating it correctly
+classified 89.08% of the cases in the validation set. This suggests the
+model is, in general, good at distinguishing between "yes" and "no"
+classes. A precision of 67.64% further indicates a moderate proportion
+of positive predictions were actually positive. However, a low recall of
+15.49% indicates missing substantial proportion of actually positive
+cases. Overall, the low F1 score indicates even though the method avoids
+many false positive, it misses many true positives. This indicate a weak
+overall performance of knn on the bank marketing data.
+
+### Linear Discriminant Analysis {#sec-lda}
+
+Linear Discriminant Analysis is a classification method used to define
+linear relationships between features. It aims to find a linear
+combination of features that best classify and differentiates between
+the classes in data. It assumes that the features are normally
+distributed and begins by modelling the features, x, in classes G=g.
+Following that, LDA uses Bayes' theorem to estimate the probability
+Pr(G=g\|X=x). We thus utilise this probability to determine the category
+based on a threshold for classification of data points.
+
+The most important step in LDA is checking the validity of assumptions
+berfore actually applying LDA. First, classes are mutually exclusive and
+exhaustive. Second, the prior probability that a randomly chosen class
+belongs to gth class is $$\pi_g=Pr(G=g)$$. Third and the most important,
+features follow a multivariate Gaussian distribution. Fourth, which acts
+as a deciding factor as to whether we should use LDA or QDA is
+class-covraince matrix. We would use LDA in case of equal covariance and
+QDA in case of unequal covraiance.
+
+In the context of our bank marketing data, although the first two
+assumptions seem theoretically valid from \@@sec-EDA, we observed in
+@scat in @sec-EDA that very few variables like age, cons.price.idx and
+cons.conf.idx fairly follow a Gaussian distribution while others do not.
+This violates an essential assumption of LDA. To further analyse the
+validity of LDA we examine the class-covariance matrix as variance
+between groups in features. In this case, we observe that large
+difference in variance between groups indicating violation of another of
+the key assumptions.
+
+These violations thus deem LDA as an inappropriate choice for our bank
+marketing dataset. However, it would be interesting to observe LDA on
+three of the features which satisfy the Gaussian distribution. These
+features are age, cons.price.idx and cons.conf.idx. Hence, we perform
+LDA on these variables.
+
+```{r}
+set.seed(1)
+
+#Computing variance for each group
+for (i in c(3:41)){
+  cat(colnames(banking_data_train[,c(3:41)])[i],sep="\n")
+  print(aggregate((banking_data_train[,c(3:41)]),by=list(banking_data_train$y),var)) 
+}
+
+#ggpairs: fairly Gaussian distribution for age but not for other variables like nr.employed and cons.price.index
+#grouped variance show large difference in variance between groups, like nr.employed and cons.price.index
+
+#LDA model
+banking.lda <- lda(y~age+cons.price.idx+cons.conf.idx,data=banking_data_train)
+banking.lda 
+
+```
+
+```{r}
+#| label: fig-lda
+#| fig-cap: Linear Discriminant Analysis Histogram Per Class
+#Plotting result from lda
+set.seed(1)
+plot(banking.lda)
+```
+
+In @fig-lda it can observed that the linear discriminant function hardly
+separates the two classe. There is evidence of overlap. However, it
+should be noted that only a subset of the many features of interest are
+explored in this method. To further assess the performance of LDA
+examine numerical summaries are examined.
+
+```{r}
+#Prediction 
+lda.pred<-predict(banking.lda,banking_data_valid)
+
+#Checking values
+names(lda.pred)
+
+#Checking class values
+head(lda.pred$class,10)
+
+#Error rate
+acc<-mean(banking_data_valid$y==lda.pred$class)
+1-acc #0.1188
+
+#Classification rate for prediction on the validation set
+lda.tab<-table(banking_data_valid$y,lda.pred$class)
+lda.tab  
+
+#class specific classification rates for prediction on the validation set
+lda.tab.prop<-prop.table(lda.tab,margin=1)
+lda.tab.prop
+
+```
+
+Initially, it is observed that approximately 11.88% of the predictions
+made by the LDA model on the validation dataset were incorrect. On
+further analysis of confusion matrix it is observed that out of 2203
+clients who did not subscribe for the term deposit, LDA misclassifies
+zero, which is very good. However, of 297 clients who said yes to
+subscription, LDA incorrectly predicts all of them as no.
+
+In another attempt to modify LDA for better results Bayes discrimination
+rule which states to assign an object to the class with the largest
+posterior probability, is utilised. Here, if a standard threshold of 50%
+for posterior probability of a yes for subscription is set. A few
+thresholds to analyse the deviations in the result are explored for
+better results in the analysis.
+
+```{r}
+#Adjusting the classification threshold as 25% 
+data.pred.new1<-ifelse(lda.pred$posterior[ ,2]>0.25,"yes","no") 
+
+#Adjusting the classification threshold as 50% 
+data.pred.new2<-ifelse(lda.pred$posterior[ ,2]>0.50,"yes","no") 
+
+#Adjusting the classification threshold as 75% 
+data.pred.new3<-ifelse(lda.pred$posterior[ ,2]>0.75,"yes","no") 
+
+
+#Error rate for 25%
+acc1<-mean(banking_data_valid$y==data.pred.new1)
+1-acc1 #0.1268
+
+#Error rate for 50%
+acc2<-mean(banking_data_valid$y==data.pred.new2)
+1-acc2 #0.1188
+
+#Error rate for 75%
+acc3<-mean(banking_data_valid$y==data.pred.new3)
+1-acc3 #0.1188
+
+table.predict<-table(banking_data_valid$y,data.pred.new2)
+table.predict
+
+table.rate<-prop.table(table.predict,margin=1)
+table.rate
+
+```
+
+Using 25% as the threshold, it is observed that the error rate goes up
+to 12.68% of the predictions made by the LDA model. This makes the LDA
+prediction worse. For a threshold of 50% and75%, the error rate stays
+the same as earlier indicating no improvement in the model predictions
+with confusion matrix also indicating no improvement.
+
+A final look at the ROC curve and AUC would help in solidifying the
+arguments even further.
+
+```{r}
+set.seed(1)
+#ROC and AUC
+prediction<-prediction(lda.pred$posterior[ ,2],banking_data_valid$y)
+perf<-performance(prediction,"tpr","fpr")
+plot(perf,main="ROC")
+
+#To calculate AUC
+AUC<-performance(prediction,"auc")
+AUC@y.values[[1]]
+```
+
+The ROC is far from indicating a good classification techniques, it is
+fairly closer to a random guess. The AUC for the data subset being
+considered is closer to random guess, 0.59, hence providing evidence of
+a not so good classifier.
+
+In conclusion, it is important to state that this LDA analysis was
+conducted only on a subset of features which fairly followed a
+multivariate Gaussian distribution. Hence, it cannot be considered as an
+overall classifier for the subscription responses since other features
+we have been observed in @sec-EDA to have had a significant impact on
+the response variable weren't eligible for LDA. Even for the few
+variables of interest, the results don't seem very impressive indicating
+LDA as a not a very good classifier for the bank marketing data.
+
+### Quadratic Discriminant Analysis {#sec-qda}
+
+Quadratic Discriminant Analysis (QDA) is an extension of Linear
+Discriminant Analysis which models categorical variables, specially
+those having non-linear decision boundary and unequal variance in
+grouped features. is a statistical classification technique used for
+modeling and predicting categorical outcomes. QDA models the
+distribution of each class for predictions.
+
+Similar to LDA, QDA assumes that each class comes from a distinct
+multivariate normal distribution. Unlike LDA, which assumes a single
+common covariance matrix for all classes, QDA gives the flexibility for
+each class to have its own coveriance matrix in or to capture complex
+decision boundaries.
+
+QDA is actually a better choice for the bank marekting dataset as it
+considers the case with unequal class covariance matrix which is the
+case in the data being analysed in this study. So, in addtion to LDA,
+QDA is also performed on the few fairly normally distributed features in
+order to compare the two methods.
+
+```{r}
+#LDA model
+set.seed(1)
+banking.qda <- qda(y~age+cons.price.idx+cons.conf.idx,data=banking_data_train)
+banking.qda 
+
+qda.pred<- predict(banking.qda,banking_data_valid)
+```
+
+To begin with, the class are predicted on validation data and will be
+considering the performance of age, cons.price.idx and cons.conf.idx.
+However, it should be noted that only a subset of the many features
+opposed to other important features of interest to be explored are
+utilised, due to the violation of normality assumption. Hence, to assess
+the performance of QDA the numerical summaries are examined.
+
+```{r}
+#Checking values
+names(qda.pred)
+
+#Checking class values
+head(lda.pred$class,10)
+
+acc<-mean(banking_data_valid$y == qda.pred$class)
+1-acc # 0.1256
+
+#Classification rate for prediction on the validation set
+qda.tab<-table(banking_data_valid$y,qda.pred$class)
+qda.tab  
+
+#class specific classification rates for prediction on the validation set
+qda.tab.prop<-prop.table(qda.tab,margin=1)
+qda.tab.prop
+
+```
+
+Initially, it is observed that approximately 12.56% of the predictions
+made by the QDA model on the validation dataset were incorrect, Which is
+higher as compared to LDA. On further analysis of confusion matrix it is
+observed that out of 2203 clients who did not subscribe for the term
+deposit, QDA misclassifies 82 (3.72%), which implies poor results as
+compared to LDA which misclassified zero. However, out of 297 clients
+who said yes to subscription, QDA incorrectly predicts 232 (78.11%) of
+them as no, which indicates better results than LDA.
+
+In another attempt to modify QDA for better results, Bayes
+discrimination rule which states we assign an object to the class with
+the largest posterior probability, that is class which has the largest
+QDF, is utilised. Here, a few thresholds to analyse the deviations in
+the results are explored.
+
+```{r}
+#Adjusting the classification threshold as 25% 
+qda.pred.new1<-ifelse(qda.pred$posterior[ ,2]>0.25,"yes","no") 
+
+#Adjusting the classification threshold as 50% 
+qda.pred.new2<-ifelse(qda.pred$posterior[ ,2]>0.50,"yes","no") 
+
+#Adjusting the classification threshold as 75% 
+qda.pred.new3<-ifelse(qda.pred$posterior[ ,2]>0.75,"yes","no") 
+
+
+#Error rate for 25%
+acc1<-mean(banking_data_valid$y==qda.pred.new1)
+1-acc1 #0.1264
+
+#Error rate for 50%
+acc2<-mean(banking_data_valid$y==qda.pred.new2)
+1-acc2 #0.1256
+
+#Error rate for 75%
+acc3<-mean(banking_data_valid$y==qda.pred.new3)
+1-acc3 #0.1248
+
+table.predict<-table(banking_data_valid$y,data.pred.new3)
+table.predict
+
+table.rate<-prop.table(table.predict,margin=1)
+table.rate
+
+```
+
+Using 25% as the threshold, it is observed that the error rate goes down
+slightly to 12.64% indicating a minor improvement from LDA with the same
+threshold. For a threshold of 50% and 75%, the error rate imporoves on
+increasing the threshold indicating improvement in the model
+predictions. However at these thresholds, LDA had a slighty lower error
+rate. In contrast, the confusion matrix of QDA now indicates the same
+results as LDA.
+
+A final look at the ROC curve and AUC would help in solidifying the
+arguments even further.
+
+```{r}
+set.seed(1)
+#ROC and AUC
+prediction<-prediction(qda.pred$posterior[ ,2],banking_data_valid$y)
+perf<-performance(prediction,"tpr","fpr")
+plot(perf,main="ROC for QDA")
+
+#To calculate AUC
+AUC<-performance(prediction,"auc")
+AUC@y.values[[1]]
+```
+
+The ROC again is far from indicating a good classification technique, it
+indicates slightly better results for QDA as compared to LDA. The AUC
+for the data subset being considered is closer to random guess, 0.67 but
+still better than LDA (0.59). Hence providing evidence of QDA being a
+better classifier relative to LDA, however not so good a classifier in
+general.
+
+In conclusion, it is extremely important to consider that LDA and QDA
+was conducted only on a subset of features which fairly followed a
+multivariate Gaussian distribution. Hence, it cannot be considered as an
+overall classifier for the subscription responses since other features
+we have observed in @sec-EDA to have had a significant impact on the
+repsonse variable weren't eligible for LDA and QDA. Even for the few
+variables of interest, the results don't seem very impressive. Although
+QDA does a slightly better job than LDA, both of them are not very good
+classifiers for the whole data in general as the assumption of normality
+is violated in the data.
+
+## Support Vector Machines {#sec-Method_3}
+
+The purpose of an Support vector machines (SVMs) is to fit a hyperplane
+that divides the points of the two classes into distinct zones. By
+kernel trick, it can be mapped to a new space to solve the
+classification problem of the original space: the resulting function is
+linear in new space, but non-linear in the primitive. This method is
+intended for the binary classification, which is suitable for this data
+set. And it is compatible to deal with the categorical variables, so
+there is no requirement to convert them to numerical variables.
+
+The choices of kernel functions are linear kernel, polynomial kernel,
+radial basis function (RBF) kernel and sigmoid kernel, the first three
+are chosen. And the classification for different values of parameters is
+fitted, the one with the smallest validation prediction error is finally
+chosen for each function.
+
+-   The model fulfills the assumptions
+
+-   'type = C-classification' is used since the aim is to classify
+
+-   All functions specifies the cost parameter
+
+-   Polynomial kernel adds a parameter D:degree, when degree \> 1, we
+    are fitting a hyperplane in a higher-dimensional space involving
+    polynomials of degree
+
+-   In RBF kernel, gamma is positive constant which defines the
+    influence of a single sample when mapping
+
+```{r, include=FALSE}
+# Scale training set
+banking_data_train_svm_numeric <- banking_data_train_svm %>%
+  select_if(is.numeric)
+banking_data_train_svm_not_numeric <- banking_data_train_svm %>% 
+  select_if(Negate(is.numeric))
+num_min <- sapply(banking_data_train_svm_numeric, min)
+num_max <- sapply(banking_data_train_svm_numeric, max)
+banking_data_train_svm_numeric <- (banking_data_train_svm_numeric - num_min) / (num_max - num_min)
+banking_data_train_svm <- cbind(banking_data_train_svm_numeric, banking_data_train_svm_not_numeric)
+```
+
+```{r, include=FALSE}
+# Scale Validation set
+banking_data_valid_svm_numeric <- banking_data_valid_svm %>%
+  select_if(is.numeric)
+banking_data_valid_svm_not_numeric <- banking_data_valid_svm %>% 
+  select_if(Negate(is.numeric))
+num_min <- sapply(banking_data_valid_svm_numeric, min)
+num_max <- sapply(banking_data_valid_svm_numeric, max)
+banking_data_valid_svm_numeric <- (banking_data_valid_svm_numeric - num_min) / (num_max - num_min)
+banking_data_valid_svm <- cbind(banking_data_valid_svm_numeric, banking_data_valid_svm_not_numeric)
+```
+
+```{r, include=FALSE}
+# Scale Testing set
+banking_data_test_svm_numeric <- banking_data_test_svm %>%
+  select_if(is.numeric)
+banking_data_test_svm_not_numeric <- banking_data_test_svm %>% 
+  select_if(Negate(is.numeric))
+num_min <- sapply(banking_data_test_svm_numeric, min)
+num_max <- sapply(banking_data_test_svm_numeric, max)
+banking_data_test_svm_numeric <- (banking_data_test_svm_numeric - num_min) / (num_max - num_min)
+banking_data_test_svm <- cbind(banking_data_test_svm_numeric, banking_data_test_svm_not_numeric)
+```
+
+**Assumptions**
+
+-   As mentioned earlier, SVM requires the response variable to be a
+    binary variable.
+
+    This assumption is valid due to construction and interpretation of
+    the data set
+
+-   The characteristics should ideally be on a similar scale.
+
+    The process of scaling has been applied on banking_data_train_svm,
+    banking_data_valid_svm and banking_data_test_svm to achieve this.
+
+-   The performance of support vector machines depends crucially on the
+    hyperparameters chosen.
+
+    For each function, parameters are carefully chosen by by comparing
+    them and minimizing validation prediction error.
+
+-   For linear boundaries, as specified by the by linear kernel, after
+    the model is fit, there's a good Accuracy(0.889) for linear kernel
+    but low F1 Score(0.283), indicating that there is not enough
+    evidence if the data is linearly se
+
+    So soft margin is used, and also turn to non-linear using kernel
+    trick
+
+```{r, include=FALSE}
+# some functions will be used for comparison
+pred.error<-function(pred,truth){
+mean(pred!=truth)
+}
+sensitivity <- function(table) {
+  TP <- table["yes", "yes"]
+  FN <- table["no", "yes"]
+  sensitivity <- TP / (TP + FN)
+  return(sensitivity)
+}
+specificity <- function(table) {
+  TN <- table["no", "no"]
+  FP <- table["yes", "no"]
+  specificity <- TN / (TN + FP)
+  return(specificity)
+}
+accuracy <- function(table) {
+  TP <- table["yes", "yes"]
+  TN <- table["no", "no"]
+  FP <- table["yes", "no"]
+  FN <- table["no", "yes"]
+  accuracy <- (TP + TN) / (TP + TN + FP + FN)
+  return(accuracy)
+}
+f1_score <- function(table) {
+  TP <- table["yes", "yes"]
+  FP <- table["yes", "no"]
+  FN <- table["no", "yes"]
+  precision <- TP / (TP + FP)
+  recall <- TP / (TP + FN)
+  f1_score <- 2 * (precision * recall) / (precision + recall)
+  return(f1_score)
+}
+```
+
+**linear kernel**
+
+```{r, include=FALSE}
+# cost
+# range is based on Lab
+# 100 is too large for iteration
+C.val1 <- c(0.01,0.1,1,10)
+C.error1 <- numeric(length(C.val1))
+
+for(i in 1:length(C.val1)){
+  model <- svm(y~., data = banking_data_train_svm, type="C-classification", kernel="linear", cost = C.val1[i])
+    pred.model <- predict(model, banking_data_valid_svm)
+    C.error1[i] <- pred.error(pred.model, banking_data_valid_svm$y)
+}
+C.error1
+C.sel1 <- C.val1[min(which.min(C.error1))]
+# 0.1
+
+plot(C.val1, C.error1, type="b")
+abline(v=C.sel1, lty=2)
+
+final.svm1 <- svm(y~., data=banking_data_train_svm, kernel="linear", cost=C.sel1, type="C-classification")
+summary(final.svm1)
+# 1194 support vectors to create decision boundary
+# 1194/5000=23.88% of the training data
+
+pred.test <- predict(final.svm1, banking_data_test_svm)
+pred.error(pred.test, banking_data_test_svm$y)
+
+table1 <- table(banking_data_train_svm$y, predict(final.svm1))
+table1
+
+sensitivity_1 <- sensitivity(table1)
+specificity_1 <- specificity(table1)
+accuracy_1 <- accuracy(table1)
+f1_score_1 <- f1_score(table1)
+```
+
+**polynomial kernel**
+
+```{r, include=FALSE}
+# cost
+# degree
+# range is based on Lab
+# 100 is too large for iteration
+C.val2 <- c(0.01,0.1,1,10)
+D.val2 <- 2:5
+C.error2 = matrix(nrow = length(C.val2), ncol = length(D.val2))
+
+for(i in 1:length(C.val2)){
+  for(j in 1:length(D.val2)){
+    model <- svm(y~., data = banking_data_train_svm, type="C-classification", kernel="polynomial", cost = C.val2[i], degree = D.val2[j])
+    pred.model <- predict(model, banking_data_valid_svm)
+    C.error2[i,j] = pred.error(pred.model, banking_data_valid_svm$y)
+  }
+}
+C.error2
+min.index2 <- which.min(C.error2)
+min_indices <- arrayInd(min.index2, .dim = dim(C.error2))
+C.sel2 <- C.val2[min_indices[1]]
+# 10
+D.sel2 <- D.val2[min_indices[2]]
+# 2
+
+final.svm2 <- svm(y~., data = banking_data_train_svm, type="C-classification", kernel="polynomial", cost = C.sel2, degree = D.sel2)
+summary(final.svm2)
+
+pred.test <- predict(final.svm2, banking_data_test_svm)
+pred.error(pred.test, banking_data_test_svm$y)
+
+table2 <- table(banking_data_train_svm$y, predict(final.svm2))
+table2
+sensitivity_2 <- sensitivity(table2) # 0.68
+specificity_2 <- specificity(table2) # 0.91
+accuracy_2 <- accuracy(table2) # 0.8998
+f1_score_2 <- f1_score(table2) # 0.2770
+```
+
+**radial kernel**
+
+```{r, include=FALSE}
+# cost
+# gamma
+# range is based on Lab
+# 100 is too large for iteration
+C.val3 <- c(0.01,0.1,1,10)
+G.val3 <- c(0.001,0.01,0.1,1,10)
+C.error3 = matrix(nrow = length(C.val3), ncol = length(G.val3))
+
+for(i in 1:length(C.val3)){
+  for(j in 1:length(G.val3)){
+    model <- svm(y~., data = banking_data_train_svm, type="C-classification", kernel="radial", cost = C.val3[i], gamma = G.val3[j])
+    pred.model <- predict(model, banking_data_valid_svm)
+    C.error3[i,j] = pred.error(pred.model, banking_data_valid_svm$y)
+  }
+}
+C.error3
+min.index3 <- which.min(C.error3)
+min_indices <- arrayInd(min.index3, .dim = dim(C.error3))
+C.sel3 <- C.val3[min_indices[1]]
+# 10
+G.sel3 <- G.val3[min_indices[2]]
+# 0.01
+final.svm3 <- svm(y~., data = banking_data_train_svm, type="C-classification", kernel="radial", cost = C.sel3, gamma = G.sel3)
+summary(final.svm3)
+
+pred.test <- predict(final.svm3, banking_data_test_svm)
+pred.error(pred.test, banking_data_test_svm$y)
+
+table3 <- table(banking_data_train_svm$y, predict(final.svm3))
+table3
+sensitivity_3 <- sensitivity(table3)
+specificity_3 <- specificity(table3)
+accuracy_3 <- accuracy(table3)
+f1_score_3 <- f1_score(table3)
+```
+
+```{r}
+#| label: tbl-SVM
+#| tbl-cap: "different kernels' performance"
+table <- data.frame(
+  Metric = c("Sensitivity", "Specificity", "Accuracy", "F1 Score"),
+  Model_1 = c(sensitivity_1, specificity_1, accuracy_1, f1_score_1),
+  Model_2 = c(sensitivity_2, specificity_2, accuracy_2, f1_score_2),
+  Model_3 = c(sensitivity_3, specificity_3, accuracy_3, f1_score_3)
+)
+knitr::kable(table, digits = 3)
+```
+
+According to @tbl-SVM, on the basis of Sensitivity, it is better to
+choose the polynomial kernel. But if F1 score is set to be used to
+compare with other models, then models with linear kernel or radial
+kernel may be chosen.
+
+The linear kernel and radial kernel perform similarly in terms of
+classification decision boundaries, possibly because the Radial Basis
+Function (RBF) does not significantly improve performance. Since the
+data doesn't need to be mapped into a higher dimensional space, the
+linear kernel alone may be sufficient.
+
+## Decision Trees {#sec-Method_4}
+
+Decision trees are versatile supervised learning algorithms used for
+classification and regression tasks, constructing hierarchical
+structures that partition data based on feature values to predict
+outcomes. Constructing an effective decision tree involves selecting
+parameters like complexity, minimum splits, and depth, which are
+fine-tuned using grid search techniques to optimize performance metrics
+such as accuracy and F1 score. Additionally, tree pruning techniques,
+such as minimum error reduction and smallest tree size, are applied to
+prevent overfitting and simplify the model. Evaluating these models
+using metrics like sensitivity, specificity, and AUC helps in
+understanding their predictive power and generalizability, guiding the
+selection of the most effective model configuration.
+
+```{r}
+evaluate_model <- function(model_name, data = banking_data_valid_tree, threshold = 0.5) {  # Added 'data' as an argument
+  
+  # Ensure actual outcomes are factored with levels in the order "yes", "no"
+  actual <- factor(data$y, levels = c("yes", "no"))
+  
+  # Extract predicted probabilities and classify based on the threshold
+  predicted_probs <- predict(get(deparse(substitute(model_name))), newdata = data, type = "prob")[, "yes"]
+  predicted_classes <- ifelse(predicted_probs > threshold, "yes", "no")
+  predicted_classes <- factor(predicted_classes, levels = c("yes", "no"))
+  
+  # Generate Confusion Matrix and calculate metrics
+  cm <- confusionMatrix(predicted_classes, actual)
+  accuracy <- cm$overall['Accuracy']
+  sensitivity <- cm$byClass['Sensitivity']
+  specificity <- cm$byClass['Specificity']
+  F1_score <- cm$byClass['F1']
+  
+  # Calculate AUC using pROC
+  ROC_curve <- roc(response = actual, predictor = as.numeric(predicted_probs), levels = rev(levels(actual)))
+  AUC <- pROC::auc(ROC_curve)
+  
+  # Compile and return the results
+  results_df <- data.frame(
+    Metric = c("Accuracy", "Sensitivity", "Specificity", "F1 Score", "AUC"),
+    Value = c(accuracy, sensitivity, specificity, F1_score, AUC)
+  )
+  
+  print(results_df, row.names = FALSE)  # Print the results without row names
+}
+
+```
+
+```{r}
+print_cm <- function(model, data = banking_data_valid_tree, threshold = 0.5) {
+  # Ensure required libraries are loaded
+  if (!requireNamespace("caret", quietly = TRUE)) {
+    install.packages("caret")
+  }
+  library(caret)
+  
+  # Extract actual outcomes and ensure the factor levels are in the correct order
+  actual <- factor(data$y, levels = c("yes", "no"))  # Ensure 'y' matches your response variable name
+  
+  # Predict probabilities and classify based on the threshold
+  predicted_probs <- predict(model, newdata = data, type = "prob")
+  # Ensure the correct index for 'yes' class; it assumes that 'yes' is the second level
+  # Modify if your 'yes' class is at a different index
+  predicted_classes <- ifelse(predicted_probs[, "yes"] > threshold, "yes", "no") 
+  predicted_classes <- factor(predicted_classes, levels = c("yes", "no"))
+  
+  # Create the confusion matrix
+  cm <- confusionMatrix(predicted_classes, actual)
+  
+  # Print the confusion matrix
+  print(cm)  # Only print the table part for brevity; remove '$table' if full output is needed
+}
+
+```
+
+```{r}
+evaluate_model_summary <- function(model, model_name, data = banking_data_valid_tree, threshold = 0.5) {
+
+  actual <- factor(data$y, levels = c("yes", "no"))  # Ensure actual outcomes are factored correctly
+  predicted_probs <- predict(model, newdata = data, type = "prob")[, "yes"]  # Assume 'yes' is the second level
+  predicted_classes <- ifelse(predicted_probs > threshold, "yes", "no")
+  predicted_classes <- factor(predicted_classes, levels = c("yes", "no"))  # Ensure predicted classes are factored correctly
+  
+  # Calculate metrics
+  cm <- confusionMatrix(predicted_classes, actual)
+  accuracy <- cm$overall['Accuracy']
+  sensitivity <- cm$byClass['Sensitivity']
+  specificity <- cm$byClass['Specificity']
+  F1_score <- cm$byClass['F1']
+  
+  # AUC
+  auc_value <- pROC::auc(roc(response = actual, predictor = as.numeric(predicted_probs), levels = rev(levels(actual))))
+  
+  # Return the formatted summary
+  return(data.frame(Model = model_name, Accuracy = accuracy, Sensitivity = sensitivity, 
+                    Specificity = specificity, F1_Score = F1_score, AUC = auc_value))
+}
+
+```
+
+```{r}
+visualize_metrics <- function(model, data = banking_data_valid_tree, thresholds = seq(0, 1, by = 0.01)) {
+  
+  # Initialize vectors to store metrics
+  accuracy <- sensitivity <- specificity <- F1_scores <- numeric(length(thresholds))
+  
+  # Extract actual outcomes and convert to factor with correct levels
+  actual <- factor(data$y, levels = c("yes", "no"))
+  
+  # Predict probabilities for the positive class
+  predicted_probs <- predict(model, newdata = data, type = "prob")[, "yes"]
+
+  # Compute metrics for each threshold
+  for (i in seq_along(thresholds)) {
+    threshold <- thresholds[i]
+    predicted_classes <- ifelse(predicted_probs > threshold, "yes", "no")
+    predicted_classes <- factor(predicted_classes, levels = c("yes", "no"))
+    
+    cm <- confusionMatrix(predicted_classes, actual)
+    accuracy[i] <- cm$overall['Accuracy']
+    sensitivity[i] <- cm$byClass['Sensitivity']
+    specificity[i] <- cm$byClass['Specificity']
+    F1_scores[i] <- cm$byClass['F1']
+  }
+
+  # Compute AUC separately since it's not threshold-dependent
+  AUC_value <- pROC::auc(roc(actual, predicted_probs))
+  
+  # Combine the metrics into a data frame for plotting
+  results <- data.frame(
+    Threshold = thresholds, 
+    Accuracy = accuracy, 
+    Sensitivity = sensitivity, 
+    Specificity = specificity, 
+    F1_Score = F1_scores, 
+    AUC = rep(AUC_value, length(thresholds))
+  )
+  
+  # Plot the metrics against thresholds
+  ggplot(results, aes(x = Threshold)) + 
+    geom_line(aes(y = Accuracy, colour = "Accuracy"), size = 1.2) +
+    geom_line(aes(y = Sensitivity, colour = "Sensitivity"), size = 1.2) +
+    geom_line(aes(y = Specificity, colour = "Specificity"), size = 1.2) +
+    geom_line(aes(y = F1_Score, colour = "F1 Score"), size = 1.2) +
+    geom_line(aes(y = AUC, colour = "AUC"), size = 1.2, linetype = "dashed") +
+    scale_colour_manual(values = c(
+      Accuracy = "blue", Sensitivity = "red", 
+      Specificity = "green", "F1 Score" = "purple", AUC = "orange")) +
+    labs(y = "Metric Value", title = "Model Performance Metrics Across Different Thresholds") +
+    theme_minimal()
+}
+
+```
+
+### Model Development
+
+A base decision tree was constructed using the rpart package in R. This
+base model served as a foundation for comparing subsequent, more refined
+models. Following the development of the base decision tree model,
+parameter tuning is conducted to enhance its performance. The tuning
+process involves exploring a grid of parameters, also refereed as
+stopping criteria:
+
+-   cp (Complexity Parameter)
+
+-   minsplit (Minimum Split)
+
+-   minbucket (Minimum Bucket)
+
+-   maxdepth (Maximum Depth)
+
+For each combination of these parameters, a new decision tree model was
+trained. The models' performances were evaluated, allowing to identify
+the optimal set of parameters based on our predefined metrics,
+particularly focusing on improving the F1 score due to its relevance in
+scenarios with imbalanced classes.
+
+```{r}
+# Build base tree model
+model_tree <- rpart(y ~., data = banking_data_train_tree, method = "class")
+```
+
+```{r}
+# Define your parameter grid
+set.seed(1)
+params_grid <- expand.grid(cp = seq(0.01, 0.1, by = 0.01), 
+                           minsplit = c(10, 20, 30, 40),
+                           minbucket = c(5, 10, 15, 20),
+                           maxdepth = c(5, 10, 15, 20))
+
+results <- data.frame(cp = numeric(), minsplit = numeric(), minbucket = numeric(), 
+                      maxdepth = numeric(), Accuracy = numeric(), F1 = numeric())
+
+for(i in 1:nrow(params_grid)) {
+  params <- params_grid[i, ]
+  
+  model <- rpart(y ~ ., data = banking_data_train_tree, method = "class",
+                 control = rpart.control(cp = params$cp, 
+                                         minsplit = params$minsplit,
+                                         minbucket = params$minbucket,
+                                         maxdepth = params$maxdepth))
+  
+  predictions <- predict(model, banking_data_valid_tree, type = "class")
+  # Ensure predictions are factors with the same levels as the training outcomes
+  predictions <- factor(predictions, levels = levels(banking_data_valid_tree$y))
+  
+  cm <- confusionMatrix(predictions, banking_data_valid_tree$y)
+  accuracy <- cm$overall['Accuracy']
+  f1 <- cm$byClass['F1']
+  
+  # Create a temporary data frame to store the iteration results
+  temp_results <- data.frame(cp = params$cp, minsplit = params$minsplit, 
+                             minbucket = params$minbucket, maxdepth = params$maxdepth, 
+                             Accuracy = accuracy, F1 = f1)
+  # Combine with main results data frame
+  results <- rbind(results, temp_results)
+}
+
+# Identify the best-performing set of parameters
+best_params <- results[which.max(results$Accuracy), ]
+print(best_params)
+```
+
+```{r}
+model_tree_criteria <- rpart(y ~ ., data = banking_data_train_tree, method = "class", cp = 0.01, minsplit = 10, minbucket = 15, maxdepth = 5)
+```
+
+### Tree Pruning
+
+In addition to tuning the base model, tree pruning strategies are
+implemented to reduce overfitting and simplify the model. Two approaches
+are utilized:
+
+-   **Minimum Error Strategy**: Pruning the tree based on a criterion
+    that seeks to minimize prediction error, which could involve cutting
+    back the tree until the additional complexity does not significantly
+    reduce the model's error rate on validation data.
+
+-   **Smallest Tree Strategy**: This approach involves reducing the tree
+    to its simplest form without a significant drop in predictive
+    accuracy, aiming for the most interpretable model.
+
+```{r}
+# Build full-grown tree by setting cp = -1
+set.seed(1)
+model_tree_full <- rpart(y ~ ., data = banking_data_train_tree, method = "class", cp = -1)
+```
+
+```{r}
+## Pruning with Minimum Error
+min_error_cp <- model_tree_full$cptable[which.min(model_tree_full$cptable[, "xerror"]), "CP"]
+pruned_tree_min_error <- prune(model_tree_full, cp = min_error_cp)
+```
+
+```{r}
+# Pruning with Smallest Tree
+min_error <- min(model_tree_full$cptable[, "xerror"])
+min_error_std <- model_tree_full$cptable[which.min(model_tree_full$cptable[, "xerror"]), "xstd"]
+smallest_tree_cp <- model_tree_full$cptable[model_tree_full$cptable[, "xerror"] <= min_error + min_error_std, "CP"][1]
+pruned_tree_smallest <- prune(model_tree_full, cp = smallest_tree_cp)
+```
+
+### Results
+
+```{r}
+# Apply function to each model
+results_1 <- rbind(
+  evaluate_model_summary(model_tree, "Base Tree"),
+  evaluate_model_summary(model_tree_criteria, "Base Tree Tuned "),
+  evaluate_model_summary(pruned_tree_min_error, "Pruned Tree Min Error"),
+  evaluate_model_summary(pruned_tree_smallest, "Pruned Tree Smallest")
+)
+
+# View the results
+results_table_1 <- results_1 %>%
+  gt(rownames_to_stub = FALSE)%>%
+  fmt_number(
+    columns = everything(), 
+    decimals = 3
+  )
+results_table_1
+```
+
+The performance metrics table for the decision tree models shows that
+tuning and pruning strategies have minimal impact on the overall
+accuracy, which remains consistent across all models. However, there is
+a noticeable decline in sensitivity (recall) and F1 score as the models
+move from the base tree to the pruned versions, indicating a potential
+loss in the ability to correctly identify positive cases. Specifically,
+both pruned models show identical decreases in sensitivity and F1 score
+compared to the base models, suggesting that pruning may overly simplify
+the model, reducing its effectiveness in identifying true positives
+without significantly improving specificity or AUC. The marginal
+increase in specificity and AUC in the tuned and pruned models does not
+compensate for the loss in sensitivity and F1 score. Thus, while efforts
+to optimize and simplify the models through tuning and pruning maintain
+high specificity and slightly improved AUC, they may compromise the
+models' ability to detect the positive class effectively.
+
+### Interpretation
+
+```{r}
+rpart.plot(model_tree)
+```
+
+**Significance of Employment Rate (nr.employed)**: The tree splits first
+on nr.employed, suggesting that the employment rate is a significant
+predictor. Specifically, clients with nr.employed less than 5088 are
+more likely to subscribe (the left branch), indicating that lower
+employment rates might correlate with higher subscription rates,
+possibly due to more aggressive investment or savings behaviors during
+times of lower employment rates.
+
+**Impact of Previous Outcomes (poutcome**): For clients within the lower
+employment rate segment, the tree further distinguishes based on the
+outcome of previous marketing campaigns (poutcome = success). Clients
+who were successfully reached in previous campaigns are more likely to
+subscribe (30% chance), highlighting the importance of previous positive
+interactions with the bank.
+
+**Influence of Contact Month (month)**: On the higher employment rate
+side, the tree identifies the month of contact as a crucial factor,
+particularly March and October (month = mar,oct). Clients contacted in
+these months are more inclined to subscribe compared to other months,
+possibly due to seasonal factors or end-of-financial-period
+considerations.
+
+**Role of Economic Conditions (euribor3m)**: For clients contacted
+outside of March and October in conditions of higher employment rates,
+the Euribor 3-month rate (euribor3m \>= 1.6) serves as a further
+determinant. A higher Euribor rate seems to be associated with lower
+subscription rates, likely reflecting broader economic conditions that
+affect client decisions.
+
+### Conclusion
+
+The tree based models provide a comprehensive view of the factors
+influencing term deposit subscriptions. The best performing model
+highlights that variables such as the employment rate (nr.employed), the
+outcome of previous marketing campaigns (poutcome), the month of contact
+(month), and economic conditions (euribor3m) are pivotal in determining
+client decisions. Despite these insights, the basic tree model exhibits
+low sensitivity and F1 scores, indicating challenges in effectively
+identifying true positives. However, the consistency in accuracy and
+specificity across different tree models indicates a strong ability to
+recognize true negatives.
+
+## Bagging and Random Forest
+
+In advancing the ensemble methods, bagging was initially employed to
+reduce variance and enhance model robustness. Building on this, the
+Random Forest method was applied, incorporating feature selection
+randomness at each split. This added layer of randomness aimed to reduce
+over-fitting further and improve model generalization. Parameters within
+the Random Forest, including the number of trees and the maximum number
+of features considered at each split, were systematically tuned based on
+model performance metrics.
+
+### Bagging
+
+A bagging technique was utilized to reduce variance and enhance
+robustness by generating multiple trees from different data set samples.
+The model was then fine-tuned to improve the F1-score, thereby
+optimizing the balance between precision and recall, highlighting the
+effectiveness of ensemble methods in predictive modeling.
+
+```{r}
+library(randomForest)
+set.seed(1)  # for reproducibility
+
+# Perform Bagging (simulate by Random Forest)
+bagging_model <- randomForest(y ~ ., data = banking_data_train_tree, mtry = ncol(banking_data_train_tree) - 1, ntree = 200)
+
+```
+
+```{r}
+# Tuning Bagging Model
+# Define the parameter grid without sample size
+set.seed(1)
+params_grid <- expand.grid(ntree = c(200, 500),
+                           nodesize = c(1, 5),
+                           stringsAsFactors = FALSE)  # Keep non-list parameters
+
+# Initialize an empty data frame for tuning results
+tuning_results <- data.frame(ntree = integer(), nodesize = integer(),
+                             F1_Score = numeric(), stringsAsFactors = FALSE)
+
+
+# Loop through the parameter grid
+for (i in 1:nrow(params_grid)) {
+  # Extract parameters
+  params <- params_grid[i, ]
+  
+  # Train the model with specified parameters
+  set.seed(1)  # For reproducibility
+  model <- randomForest(y ~ ., data = banking_data_train_tree, mtry = ncol(banking_data_train_tree) - 1,
+                        ntree = params$ntree, nodesize = params$nodesize)
+  
+  # Predict and evaluate
+  predictions <- predict(model, banking_data_valid_tree, type = "class")
+  cm <- confusionMatrix(predictions, banking_data_valid_tree$y)
+  
+  # Store results
+  tuning_results <- rbind(tuning_results, c(params$ntree, params$nodesize, cm$byClass['F1']))
+}
+
+# Fix column names after rbind
+names(tuning_results) <- c("ntree", "nodesize", "F1_Score")
+
+# Identify best parameters based on F1 score
+best_params <- tuning_results[which.max(tuning_results$F1_Score), ]
+#print(best_params)
+```
+
+```{r}
+set.seed(1)
+bagging_model_tuned <- randomForest(y ~ ., data = banking_data_train_tree, mtry = ncol(banking_data_train_tree) - 1, ntree = 200, nodesize = 5)
+#evaluate_model(bagging_model_tuned)
+```
+
+### Random Forest
+
+The Random Forest method builds on bagging by introducing randomness in
+feature selection at each tree split, enhancing diversity and reducing
+over-fitting. This process improves model generalization by preventing
+reliance on any single feature, allowing for the capture of complex
+relationships.
+
+```{r}
+set.seed(1)
+# Perform Random Forest
+random_forest_model <- randomForest(y ~ ., data = banking_data_train_tree, ntree = 200)
+```
+
+```{r}
+# Tuning Random Forest
+# Define the parameter grid
+set.seed(1)
+params_grid <- expand.grid(
+  mtry = round(seq(1, sqrt(ncol(banking_data_train_tree) - 1), length.out = 5)),  # Assuming last column is the response
+  nodesize = c(1, 5),
+  stringsAsFactors = FALSE
+)
+
+tuning_results <- data.frame(
+  mtry = integer(), 
+  nodesize = integer(),
+  F1_Score = numeric(),
+  stringsAsFactors = FALSE
+)
+
+
+# Assuming banking_data_valid_tree is your validation set
+for (i in 1:nrow(params_grid)) {
+  # Extract parameters
+  params <- params_grid[i, ]
+  
+  # Train the model with specified parameters
+  set.seed(1)  # For reproducibility
+  rf_model <- randomForest(y ~ ., data = banking_data_train_tree, mtry = params$mtry,
+                           ntree = 200, nodesize = params$nodesize)
+  
+  # Make predictions on the validation set
+  predictions <- predict(rf_model, banking_data_valid_tree, type = "class")
+  
+  # Evaluate performance using F1 score
+  cm <- confusionMatrix(predictions, banking_data_valid_tree$y)
+  f1_score <- cm$byClass['F1']
+  
+  # Store results
+  tuning_results <- rbind(tuning_results, c(params$mtry, params$nodesize, f1_score))
+}
+
+# Fix column names after rbind (if necessary)
+names(tuning_results) <- c("mtry", "nodesize", "F1_Score")
+
+best_params <- tuning_results[which.max(tuning_results$F1_Score), ]
+#print(best_params)
+```
+
+```{r}
+# Build Random Forest with Best Params
+set.seed(1)
+random_forest_model_tuned <- randomForest(y ~ ., data = banking_data_train_tree, ntree = 200, mtry = 3, nodesize = 5)
+#evaluate_model(random_forest_model_tuned)
+```
+
+### Results
+
+Results showed that tuning improves both Tree Bagging and Random Forest
+models slightly in terms of accuracy, specificity, and AUC. However,
+sensitivity remains relatively low for all models, indicating a
+challenge in correctly identifying positive cases. The Random Forest
+Tuned model shows the best overall balance of metrics, suggesting it as
+the best model among those evaluated.
+
+```{r}
+# Apply function to each model
+results_2 <- rbind(
+  evaluate_model_summary(bagging_model, "Tree Bagging"),
+  evaluate_model_summary(bagging_model_tuned, "Tree Bagging Tuned"),
+  evaluate_model_summary(random_forest_model, "Random Forest"),
+  evaluate_model_summary(random_forest_model_tuned, "Random Forest Tuned") 
+
+)
+# View the results
+results_table_2 <- results_2 %>%
+  gt(rownames_to_stub = FALSE)%>%
+  fmt_number(
+    columns = everything(), 
+    decimals = 3
+  )
+results_table_2
+```
+
+### Interpretation
+
+```{r}
+varImpPlot(random_forest_model_tuned)
+```
+
+**Top Features**: The variables nr.employed, euribor3m, age, job, and
+education appear to be the most significant in influencing the model's
+predictions. These features are likely driving the majority of the
+predictive power of the model, reflecting economic conditions
+(nr.employed and euribor3m), as well as demographic and job-related
+factors (age, job, education).
+
+**Economic Indicators**: The prominence of nr.employed and euribor3m
+highlights the impact of economic factors on the decision to subscribe
+to term deposits. This aligns with expectations as economic conditions
+often play a significant role in financial decision-making.
+
+**Demographic and Job-related Factors**: The significance of age, job,
+and education underscores the importance of demographic and employment
+characteristics in influencing a client's likelihood to subscribe,
+suggesting targeted marketing strategies could be effective.
+
+### Conclusion
+
+The analysis reveals that the tuned Random Forest model outperforms its
+counterparts in accuracy, specificity, and F1 score, highlighting its
+efficiency in predicting outcomes while maintaining a strong balance
+between precision and recall. The feature importance plot indicates that
+'euribor3m' and 'nr.employed' are the most significant predictors,
+suggesting economic factors are crucial in influencing the model's
+decisions. Given these insights, the tuned Random Forest model emerges
+as a robust tool for forecasting, especially in scenarios where economic
+indicators play a pivotal role.
+
+# Results {#sec-Result}
+
+In the evaluation of machine learning models, the Random Forest model
+outperformed KNN, SVM, and Decision Tree variants in our banking data
+set analysis. It showcased the highest F1 score (0.348) and a
+well-balanced sensitivity (0.242) and specificity (0.978). This led to
+its selection as the optimal model. When applying this model to the test
+set, the Random Forest model achieved an accuracy of 0.902, sensitivity
+of 0.278, specificity of 0.980, an F1 score of 0.387, and AUC of 0.783,
+confirming its robustness and effectiveness for the task.
+
+```{r}
+# Test Results #
+test_results <- evaluate_model(random_forest_model_tuned, banking_data_test_tree)
+
+test_results <- test_results %>%
+  gt(rownames_to_stub = FALSE)%>%
+  fmt_number(
+    columns = everything(), 
+    decimals = 3
+  )
+test_results
+```
+
+# Conclusions {#sec-Conc}
+
+In our comparative study, KNN, LDA/QDA, SVM and Tree-based models are
+employed to predict whether a client is subscribed to a term deposit.
+The Random Forest model emerged as the most effective with the highest
+F1 score, which is particularly significant given the imbalanced nature
+of our dataset, showcasing a good balance between predictive metrics.
+
+The feature importance analysis in our Random Forest model highlights
+the impact of economic indicators, such as 'nr.employed' and
+'euribor3m', and demographic factors like 'age', 'job', and 'education'
+on bank deposit subscriptions. These findings suggest that both broader
+economic conditions and personal attributes significantly influence
+customer decisions, guiding targeted strategies for marketing bank
+products.
+
+The Random Forest model excels due to its ensemble approach, which
+combines multiple decision trees to reduce variance and prevent
+overfitting, leading to more reliable predictions. Its effectiveness is
+further enhanced by its ability to handle diverse variable scales
+without pre-processing, crucial for our dataset with its wide-ranging
+economic and demographic factors.
+
+# References {#sec-Ref}
+
+1.  Harrison, O. (2018) *Machine Learning Basics with the K-Nearest
+    Neighbors Algorithm.* [Online Article]. Available from:
+    <https://towardsdatascience.com/machine-learning-basics-with-the-k-nearest-neighbors-algorithm-6a6e71d01761>.
+
+2.  IBM. (2023) *K-Nearest Neighbors (KNN).* [Online Resource].
+    Available from:
+    <https://www.ibm.com/docs/en/db2oc?topic=procedures-k-nearest-neighbors-knn>.
+
+3.  Skand, K. (2017) *kNN(k-Nearest Neighbour) Algorithm in R.* [Online
+    Article]. Available from:
+    <https://rstudio-pubs-static.s3.amazonaws.com/316172_a857ca788d1441f8be1bcd1e31f0e875.html>.
+
+4.  Hsu, Chih-Wei, Chih-Chung Chang, and Chih-Jen Lin. (2016) *A
+    Practical Guide to Support Vector Classification.* [Department of
+    Computer Science, National Taiwan University]. Taipei 106, Taiwan,
+    May 19. Available from: <http://www.csie.ntu.edu.tw/~cjlin>.
+
+5.  Xiaochen Yang. (2024) *Data Mining and Machine Learning 2023-24.*
+    [Online Resource]. Available from:
+    [https://moodle.gla.ac.uk/course/](https://moodle.gla.ac.uk/course/view.php?id=38609 "https://moodle.gla.ac.uk/course/view.php?id=38609")
+
+6.  Grammar correction assistance was provided by ChatGPT, an AI
+    language model developed by OpenAI, which utilizes natural language
+    processing techniques for context-aware suggestions.
